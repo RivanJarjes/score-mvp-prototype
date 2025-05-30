@@ -3,3 +3,8 @@ uvicorn==0.24.0
 google-cloud-aiplatform[vertexai]>=1.36.4
 pydantic==2.4.2
 python-dotenv==1.0.0
+python-multipart==0.0.6
+sqlmodel==0.0.14
+passlib[bcrypt]==1.7.4
+bcrypt==4.3.0
+# i think this is updated

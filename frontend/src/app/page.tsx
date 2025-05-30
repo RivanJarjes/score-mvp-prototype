@@ -1,17 +1,187 @@
 'use client';
 
-import Editor from '@monaco-editor/react';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import type { editor } from 'monaco-editor';
+import AuthModal from './components/AuthModal';
+import Header from './components/Header';
+import LoadingSpinner from './components/LoadingSpinner';
+import MainInterface from './components/MainInterface';
+import SessionSidebar, { SessionSidebarRef } from './components/SessionSidebar';
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+  problem?: string;
+  code?: string;
+  syntax_errors?: string;
+}
 
 export default function Home() {
   const [problem, setProblem] = useState('');
-  const [response, setResponse] = useState('');
+  const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [userEmail, setUserEmail] = useState('');
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const sessionSidebarRef = useRef<SessionSidebarRef>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const handleEditorDidMount = (editor: editor.IStandaloneCodeEditor) => {
-    editorRef.current = editor;
+  // check authentication status on page load
+  useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  // handle session parameter from URL
+  useEffect(() => {
+    if (isLoggedIn) {
+      const sessionFromUrl = searchParams.get('session');
+      if (sessionFromUrl && sessionFromUrl !== currentSessionId) {
+        setCurrentSessionId(sessionFromUrl);
+        fetchSessionHistory(sessionFromUrl);
+      } else if (!sessionFromUrl && currentSessionId) {
+        // clear session if no session in URL
+        setCurrentSessionId(null);
+        setMessages([]);
+        setSessionTitle(null);
+      }
+    }
+  }, [searchParams, isLoggedIn]);
+
+  const checkAuthStatus = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/me', {
+        method: 'GET',
+        credentials: 'include',
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setIsLoggedIn(true);
+        setUserEmail(data.email);
+      } else {
+        setIsLoggedIn(false);
+      }
+    } catch (error) {
+      console.error('Error checking auth status:', error);
+      setIsLoggedIn(false);
+    } finally {
+      setCheckingAuth(false);
+    }
+  };
+
+  const fetchSessionHistory = async (sessionId: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/sessions/${sessionId}`, {
+        method: 'GET',
+        credentials: 'include',
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(data.messages);
+        setSessionTitle(data.title);
+      } else {
+        console.error('Failed to fetch session history');
+        // If session not found, clear URL parameter
+        router.replace('/');
+      }
+    } catch (error) {
+      console.error('Error fetching session history:', error);
+    }
+  };
+
+  const handleSessionSelect = (sessionId: string) => {
+    router.push(`/?session=${sessionId}`);
+  };
+
+  const startNewSession = () => {
+    setCurrentSessionId(null);
+    setMessages([]);
+    setSessionTitle(null);
+    setProblem('');
+    editorRef.current?.setValue('');
+    router.replace('/');
+  };
+
+  const handleShowLogin = () => {
+    setIsRegisterMode(false);
+    setAuthError('');
+    setShowAuthModal(true);
+  };
+
+  const handleShowRegister = () => {
+    setIsRegisterMode(true);
+    setAuthError('');
+    setShowAuthModal(true);
+  };
+
+  const handleToggleAuthMode = () => {
+    setIsRegisterMode(!isRegisterMode);
+    setAuthError('');
+  };
+
+  const handleAuth = async (email: string, password: string) => {
+    setAuthLoading(true);
+    
+    try {
+      const endpoint = isRegisterMode ? '/auth/register' : '/auth/login';
+      const body = isRegisterMode 
+        ? { email, password, student: true }
+        : { email, password };
+      
+      const res = await fetch(`http://localhost:8000${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        setIsLoggedIn(true);
+        setUserEmail(email);
+        setShowAuthModal(false);
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+        setAuthError(errorData.detail || `${isRegisterMode ? 'Registration' : 'Login'} failed`);
+      }
+    } catch (error) {
+      console.error('Auth error:', error);
+      setAuthError('Error connecting to the server');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('http://localhost:8000/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+    
+    setIsLoggedIn(false);
+    setUserEmail('');
+    setProblem('');
+    setMessages([]);
+    setCurrentSessionId(null);
+    setSessionTitle(null);
+    router.replace('/');
   };
 
   const handleSubmit = async () => {
@@ -23,7 +193,18 @@ export default function Home() {
     }
 
     setLoading(true);
-    setResponse('');
+
+    // add user message to the UI immediately
+    const userMessage: Message = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content: `Code:\n${code}\n\nProblem:\n${problem}`,
+      created_at: new Date().toISOString(),
+      problem,
+      code
+    };
+    
+    setMessages(prev => [...prev, userMessage]);
 
     try {
       const res = await fetch('http://localhost:8000/query', {
@@ -31,97 +212,126 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({
           problem: problem,
-          code: code || null
+          code: code || null,
+          session_id: currentSessionId
         }),
       });
 
       if (!res.ok) {
+        if (res.status === 401) {
+          setMessages(prev => [...prev, {
+            id: `error-${Date.now()}`,
+            role: 'assistant',
+            content: 'Error: You must be logged in to access this service',
+            created_at: new Date().toISOString()
+          }]);
+          setIsLoggedIn(false);
+          setLoading(false);
+          return;
+        }
         throw new Error(`HTTP error! status: ${res.status}`);
       }
 
       const data = await res.json();
-      setResponse(data.response);
+      
+      // update url with session ID if this is a new session
+      if (!currentSessionId && data.session_id) {
+        setCurrentSessionId(data.session_id);
+        router.replace(`/?session=${data.session_id}`);
+        // Refresh the sidebar to show the new session
+        sessionSidebarRef.current?.refreshSessions();
+      }
+
+      // add assistant message
+      const assistantMessage: Message = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content: data.response,
+        created_at: new Date().toISOString()
+      };
+
+      setMessages(prev => prev.map(msg => 
+        msg.id === userMessage.id ? { ...msg, id: `user-${Date.now()}` } : msg
+      ).concat([assistantMessage]));
+
+      // clear input after successful submission
+      setProblem('');
+      
     } catch (error) {
       console.error('Error:', error);
-      setResponse('Error connecting to the backend. Make sure the server is running on localhost:8000');
+      const errorMessage: Message = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: 'Error connecting to the backend. Make sure the server is running on localhost:8000',
+        created_at: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setLoading(false);
     }
   };
 
+  // show loading spinner while checking authentication
+  if (checkingAuth) {
+    return <LoadingSpinner />;
+  }
+
   return (
-    <div className="p-4 min-h-screen flex items-center justify-center">
-      <div className="flex gap-8">
-        {/* Left side - Inputs */}
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-2">
-            <h2 className="text-xl font-semibold">Code:</h2>
-            <div className="rounded-lg border border-black overflow-hidden w-[500px]">
-              <Editor
-                height="400px"
-                width="500px"
-                defaultLanguage="python"
-                theme="light"
-                onMount={handleEditorDidMount}
-                options={{
-                  minimap: { enabled: false },
-                  fontSize: 14,
-                  lineNumbers: 'on',
-                  roundedSelection: true,
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  contextmenu: false,
-                  quickSuggestions: false,
-                  suggestOnTriggerCharacters: false,
-                  acceptSuggestionOnEnter: 'off',
-                  tabCompletion: 'off',
-                  wordBasedSuggestions: 'off'
-                }}
-              />
-            </div>
-          </div>
+    <div className="min-h-screen">
+      <Header
+        isLoggedIn={isLoggedIn}
+        userEmail={userEmail}
+        onLogin={handleShowLogin}
+        onRegister={handleShowRegister}
+        onLogout={handleLogout}
+      />
+
+      <AuthModal
+        showAuthModal={showAuthModal}
+        isRegisterMode={isRegisterMode}
+        authLoading={authLoading}
+        authError={authError}
+        onAuth={handleAuth}
+        onToggleMode={handleToggleAuthMode}
+        onClose={() => setShowAuthModal(false)}
+      />
+
+      {/* main content - only show when logged in */}
+      {isLoggedIn ? (
+        <div className="flex h-screen">
+          {/* session sidebar */}
+          <SessionSidebar
+            currentSessionId={currentSessionId}
+            onSessionSelect={handleSessionSelect}
+            onNewSession={startNewSession}
+            ref={sessionSidebarRef}
+          />
           
-          <div className="flex flex-col gap-2">
-            <h2 className="text-xl font-semibold">Problem:</h2>
-            <textarea
-              value={problem}
-              onChange={(e) => setProblem(e.target.value)}
-              className="w-[500px] h-32 p-3 rounded-lg border border-black resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Enter the problem description..."
+          {/* main interface */}
+          <div className="flex-1">
+            <MainInterface
+              problem={problem}
+              messages={messages}
+              loading={loading}
+              sessionTitle={sessionTitle}
+              onProblemChange={setProblem}
+              onSubmit={handleSubmit}
+              onNewSession={startNewSession}
+              editorRef={editorRef}
             />
           </div>
-
-          <button
-            onClick={handleSubmit}
-            disabled={loading}
-            className="w-[500px] py-2 px-4 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors duration-200 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            {loading ? 'Submitting...' : 'Submit'}
-          </button>
         </div>
-
-        {/* Right side - Response */}
-        <div className="flex flex-col gap-2 w-[400px]">
-          <h2 className="text-xl font-semibold">Response:</h2>
-          <div className="min-h-[536px] p-4 rounded-lg border border-gray-300 bg-gray-50">
-            {loading ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-gray-500">Loading...</div>
-              </div>
-            ) : response ? (
-              <div className="text-purple-600 whitespace-pre-wrap break-words">
-                {response}
-              </div>
-            ) : (
-              <div className="text-gray-400 italic">
-                Response will appear here after submission
-              </div>
-            )}
+      ) : (
+        /* show only when logged out */
+        <div className="flex items-center justify-center min-h-screen">
+          <div className="text-center">
+            {/* empty - login/register buttons are in top right */}
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
