@@ -10,6 +10,7 @@ class User(SQLModel, table=True):
     student: bool = True
     auth_sessions: List["AuthSession"] = Relationship(back_populates="user", sa_relationship_kwargs={"cascade": "all, delete"})
     conversation_sessions: List["ConversationSession"] = Relationship(back_populates="user", sa_relationship_kwargs={"cascade": "all, delete"})
+    #instruction_sessions: List["InstructionSessions"]
 
 class AuthSession(SQLModel, table=True):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex, primary_key=True)
@@ -30,10 +31,13 @@ class ConversationSession(SQLModel, table=True):
 class Message(SQLModel, table=True):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex, primary_key=True)
     conversation_session_id: str = Field(foreign_key="conversationsession.id")
-    role: str  # "user" or "assistant"
+    role: str  # "user" or "assistant"  
     content: str  # assistant message content
     problem: str | None = None  # user problem description
     code: str | None = None  # user code provided
     syntax_errors: str | None = None  # assistant syntax errors detected
     created_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
     conversation_session: Optional[ConversationSession] = Relationship(back_populates="messages")
+"""
+class InstructionSessions(SqlMode, table=True):
+"""

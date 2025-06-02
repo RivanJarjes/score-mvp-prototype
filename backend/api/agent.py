@@ -7,26 +7,20 @@ import os
 import ast
 import logging
 import datetime as dt
+import yaml
+from pathlib import Path
 
 from .auth import get_current_user
-from .database import get_session
-from .db_models import User, ConversationSession, Message
+from ..database.database import get_session
+from ..database.db_models import User, ConversationSession, Message
+
+cfg = yaml.safe_load(
+    (Path(__file__).resolve().parent.parent / "config.yml").read_text()
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-system_prompt = """
-            You are Code-Feedback Mentor. Follow these rules:
-            If "Syntax Errors" is not empty, make sure to acknowledge them in your response.
-            Give only hints and a question that help the user debug; never paste a full corrected solution.
-            Output must be plain text (no markdown, no code fences).
-            Be concise, polite, and reference line numbers when helpful.
-            If the issue is unclear, ask a clarifying question.
-            If the user asks if his answer is correct as a follow-up, answer with "Yes" or "No" and explain why.
-            Make sure your response has no titles, headers, newlines, or other formatting.
-            DO NOT START YOUR RESPONSE WITH "Hint:" OR ANY FORM OF TITLE.
-            """
 
 class QueryRequest(BaseModel):
     problem: str
@@ -72,6 +66,8 @@ async def query(request: QueryRequest, user: User = Depends(get_current_user), d
         conv_session = None
         conversation_history = []
         
+        client = genai.Client(http_options=HttpOptions(api_version="v1"), vertexai=True, project=project_id, location=location)
+        
         if request.session_id and request.session_id.strip():
             conv_session = db.get(ConversationSession, request.session_id)
             if conv_session and conv_session.user_id != user.id:
@@ -93,9 +89,50 @@ async def query(request: QueryRequest, user: User = Depends(get_current_user), d
         
         # create a new conversation session if no valid session_id provided or session not found
         if not conv_session:
+            # generate a summary using Gemini for the session title
+            summary_prompt = f"Problem:\n\n{request.problem}\n\nCode:\n\n{request.code}"
+            try:
+                logger.info(f"Generating summary with prompt: {summary_prompt[:100]}...")
+                summary_response = client.models.generate_content(
+                    model=cfg["summary_agent"]["name"],
+                    contents=[summary_prompt],
+                    config=GenerateContentConfig(
+                        system_instruction=cfg["summary_agent"]["system_prompt"],
+                        temperature=cfg["summary_agent"]["temperature"],
+                        top_p=cfg["summary_agent"]["top_p"],
+                        max_output_tokens=cfg["summary_agent"]["tokens"]
+                    )
+                )
+                
+                logger.info(f"Raw summary response: {summary_response}")
+                logger.info(f"Summary response text: '{summary_response.text}'")
+                logger.info(f"Finish reason: {summary_response.candidates[0].finish_reason if summary_response.candidates else 'No candidates'}")
+                
+                session_title = None
+                if summary_response.text:
+                    session_title = summary_response.text.strip()
+                elif summary_response.candidates and len(summary_response.candidates) > 0:
+                    candidate = summary_response.candidates[0]
+                    if candidate.content and candidate.content.parts:
+                        session_title = "".join([part.text for part in candidate.content.parts if hasattr(part, 'text')]).strip()
+                
+                # fallback to truncated problem if summary is too long or empty
+                if not session_title or len(session_title) > 100:
+                    if not session_title:
+                        logger.info(f"Session title is empty, using truncated problem")
+                    else:
+                        logger.info(f"Session title too long ({len(session_title)} chars), using truncated problem")
+
+                    session_title = request.problem[:50] + "..." if len(request.problem) > 50 else request.problem
+                else:
+                    logger.info(f"Successfully generated session title: '{session_title}'")
+            except Exception as e:
+                logger.warning(f"Failed to generate session summary: {e}")
+                session_title = request.problem[:50] + "..." if len(request.problem) > 50 else request.problem
+            
             conv_session = ConversationSession(
                 user_id=user.id,
-                title=request.problem[:50] + "..." if len(request.problem) > 50 else request.problem
+                title=session_title
             )
             db.add(conv_session)
             db.commit()
@@ -121,17 +158,15 @@ async def query(request: QueryRequest, user: User = Depends(get_current_user), d
             full_conversation = "\n\n".join(conversation_history) + f"\n\nUser: {current_user_prompt}"
         else:
             full_conversation = current_user_prompt
-        
-        client = genai.Client(http_options=HttpOptions(api_version="v1"), vertexai=True, project=project_id, location=location)
             
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-05-20",
+            model=cfg["support_agent"]["name"],
             contents=[full_conversation],
             config=GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.25,
-                top_p=0.95,
-                max_output_tokens=512
+                system_instruction=cfg["support_agent"]["system_prompt"],
+                temperature=cfg["support_agent"]["temperature"],
+                top_p=cfg["support_agent"]["top_p"],
+                max_output_tokens=cfg["support_agent"]["tokens"]
             )
         )
         
