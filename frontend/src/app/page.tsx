@@ -241,8 +241,23 @@ export default function Home() {
       if (!currentSessionId && data.session_id) {
         setCurrentSessionId(data.session_id);
         router.replace(`/?session=${data.session_id}`);
-        // Refresh the sidebar to show the new session
+        // refresh the sidebar to show the new session
         sessionSidebarRef.current?.refreshSessions();
+        
+        // get the session title for the newly created session
+        try {
+          const sessionRes = await fetch(`http://localhost:8000/sessions/${data.session_id}`, {
+            method: 'GET',
+            credentials: 'include',
+          });
+          
+          if (sessionRes.ok) {
+            const sessionData = await sessionRes.json();
+            setSessionTitle(sessionData.title);
+          }
+        } catch (error) {
+          console.error('Error fetching session title:', error);
+        }
       }
 
       // add assistant message

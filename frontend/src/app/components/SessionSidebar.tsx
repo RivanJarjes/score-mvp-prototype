@@ -63,7 +63,6 @@ const SessionSidebar = forwardRef<SessionSidebarRef, SessionSidebarProps>(({
     const diff = now.getTime() - date.getTime();
     const days = Math.floor(Math.abs(diff) / (1000 * 60 * 60 * 24));
 
-    // If the difference is negative (future date) or very small, treat as today
     if (diff < 0 || days === 0) {
       return 'Today';
     } else if (days === 1) {

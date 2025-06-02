@@ -2,22 +2,24 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from .database import init_db, shutdown_db
-from .auth import router as auth_router, get_current_user
-from .agent import router as agent_router
+from .database.database import init_db, shutdown_db
+from .api.auth import router as auth_router, get_current_user
+from .api.agent import router as agent_router
 
-os.makedirs('logs', exist_ok=True)
+logs_dir = Path(__file__).parent / 'logs'
+logs_dir.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'logs/api_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.FileHandler(logs_dir / f'api_{datetime.now().strftime("%Y%m%d")}.log'),
         logging.StreamHandler()
     ]
 )

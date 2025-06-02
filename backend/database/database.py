@@ -1,6 +1,6 @@
 from sqlmodel import SQLModel, create_engine, Session
 
-sqlite_url = "sqlite:///./app.db"
+sqlite_url = "sqlite:///./backend/database/app.db"
 engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
 
 def get_session():
