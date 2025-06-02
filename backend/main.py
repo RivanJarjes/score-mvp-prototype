@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
 load_dotenv()
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key="aZIYFFNQHb")  # randomly generated from website for now lol
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("AUTH_SECRET_KEY")) 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],  
