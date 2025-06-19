@@ -8,4 +8,9 @@ sqlmodel==0.0.14
 passlib[bcrypt]==1.7.4
 bcrypt==4.3.0
 pyyaml>=6.0.2
+torch>=2.7.1
+transformers>=4.52.4
+datasets>=3.6.0
+evaluate>=0.4.3
+accelerate>=1.7.0
 # i think this is updated

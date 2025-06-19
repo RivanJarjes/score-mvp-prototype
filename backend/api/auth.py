@@ -8,7 +8,7 @@ from ..database.database import get_session
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SESSION_LIFETIME = timedelta(hours=12)
+SESSION_LIFETIME = timedelta(hours=24)
 
 def verify_pw(raw, hashed): return pwd_ctx.verify(raw, hashed)
 def hash_pw(raw): return pwd_ctx.hash(raw)
@@ -21,10 +21,12 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+
 class RegisterRequest(BaseModel):
     email: str
     password: str
     student: bool = True
+
 
 def get_current_user(sid: str | None = Cookie(None),
                      db: DBSession = Depends(get_session)):
@@ -34,6 +36,7 @@ def get_current_user(sid: str | None = Cookie(None),
     if not sess or sess.expires_at.replace(tzinfo=timezone.utc) < dt.now(timezone.utc):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid/expired session")
     return db.get(User, sess.user_id)
+
 
 @router.post("/login")
 def login(request: LoginRequest, db: DBSession = Depends(get_session)):
@@ -47,6 +50,7 @@ def login(request: LoginRequest, db: DBSession = Depends(get_session)):
     response.set_cookie("sid", session.id, max_age=int(SESSION_LIFETIME.total_seconds()),
                         httponly=True, secure=False, samesite="lax")
     return response
+
 
 @router.post("/logout")
 def logout(current = Depends(get_current_user), db: DBSession = Depends(get_session),

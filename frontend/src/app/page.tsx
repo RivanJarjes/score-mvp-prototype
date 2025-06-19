@@ -17,6 +17,8 @@ interface Message {
   problem?: string;
   code?: string;
   syntax_errors?: string;
+  frustration_score?: number;
+  current_topic_length?: number;
 }
 
 export default function Home() {
@@ -89,7 +91,13 @@ export default function Home() {
 
       if (res.ok) {
         const data = await res.json();
-        setMessages(data.messages);
+        // Ensure messages have all the necessary fields including current_topic_length
+        const messages = data.messages.map((msg: Message) => ({
+          ...msg,
+          frustration_score: msg.frustration_score,
+          current_topic_length: msg.current_topic_length
+        }));
+        setMessages(messages);
         setSessionTitle(data.title);
       } else {
         console.error('Failed to fetch session history');
@@ -260,6 +268,10 @@ export default function Home() {
         }
       }
 
+      // extract frustration score and current topic length from API response
+      const frustrationScore = data.frustration_analysis?.frustration_probability;
+      const currentTopicLength = data.current_topic_length;
+
       // add assistant message
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}`,
@@ -269,7 +281,12 @@ export default function Home() {
       };
 
       setMessages(prev => prev.map(msg => 
-        msg.id === userMessage.id ? { ...msg, id: `user-${Date.now()}` } : msg
+        msg.id === userMessage.id ? { 
+          ...msg, 
+          id: `user-${Date.now()}`,
+          frustration_score: frustrationScore,
+          current_topic_length: currentTopicLength
+        } : msg
       ).concat([assistantMessage]));
 
       // clear input after successful submission

@@ -1,4 +1,4 @@
-from fastapi import HTTPException, APIRouter, Depends
+from fastapi import HTTPException, APIRouter, Depends, Request
 from pydantic import BaseModel
 from google import genai
 from google.genai.types import GenerateContentConfig, HttpOptions
@@ -9,19 +9,19 @@ import logging
 import datetime as dt
 import yaml
 from pathlib import Path
+from dotenv import load_dotenv
 
 from .auth import get_current_user
 from ..database.database import get_session
 from ..database.db_models import User, ConversationSession, Message
 from ..database.helpers import get_user_sessions, get_session_history, SessionListResponse, SessionHistoryResponse
+from .analyzer import FrustrationAnalyzer
 
 cfg = yaml.safe_load(
     (Path(__file__).resolve().parent.parent / "config.yml").read_text()
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 router = APIRouter()
 
@@ -35,6 +35,8 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     response: str
     session_id: str 
+    current_topic_length: int | None = None
+    frustration_analysis: dict | None = None  # Optional frustration analysis results
 
 
 def get_syntax_errors(source: str, filename: str = "<string>"):
@@ -50,21 +52,67 @@ def get_syntax_errors(source: str, filename: str = "<string>"):
             "end_col":   getattr(err, "end_offset", None),
             "text":      err.text.rstrip("\n") if err.text else None,
         }
+    
+def make_topic_summary(client: genai.Client, user_prompt: str):
+    system_prompt = "You will create a summary of the user's prompt. The summary should be no longer than 2 or 3 sentences. This summary should act as a reference for the support agent to understand if the user's message is related to the last topic of the conversation."
+    prompt = f"User prompt: {user_prompt}"
+    response = client.models.generate_content(
+        model=cfg["summary_agent"]["name"],
+        contents=[prompt],
+        config=GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=cfg["summary_agent"]["temperature"],
+            top_p=cfg["summary_agent"]["top_p"],
+            max_output_tokens=256
+        )
+    )
+    return response.text.strip() if response.text else "No response from summary agent"
+
+
+def get_analyzer(request: Request) -> FrustrationAnalyzer | None:
+    return getattr(request.app.state, 'analyzer', None)
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query(request: QueryRequest, user: User = Depends(get_current_user), db: DBSession = Depends(get_session)):
+async def query(
+    request: QueryRequest, 
+    user: User = Depends(get_current_user), 
+    db: DBSession = Depends(get_session),
+    analyzer: FrustrationAnalyzer | None = Depends(get_analyzer)
+):
     try:
+        logger.info(f"Received request - Problem: {request.problem}")
+        
+        # analyze frustration if analyzer is available
+        frustration_analysis = None
+        if analyzer:
+            try:
+                frustration_analysis = analyzer.analyze_frustration(request.problem)
+                logger.info(f"Frustration analysis: {frustration_analysis}")
+                
+                if frustration_analysis['is_frustrated']:
+                    logger.info(f"User appears frustrated (score: {frustration_analysis['frustration_probability']:.3f})")
+                    
+            except Exception as e:
+                logger.error(f"Error during frustration analysis: {e}")
+                frustration_analysis = None
+        else:
+            logger.warning("Frustration analyzer not available")
+
+        secrets_path = Path(__file__).resolve().parent.parent / "secrets.env"
+        load_dotenv(secrets_path)
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        logger.info(f"Project ID: {project_id}")
         if not project_id:
             raise HTTPException(status_code=500, detail="Environment variables is not set")
-            
         location = "us-central1"
 
         current_user_prompt = (
-            f"Code:\n{request.code}\n\n"
             f"Problem:\n{request.problem}"
         )
+
+        if (request.code):
+            current_user_prompt += f"\n\nCode:\n{request.code}"
         
         logger.info(f"Received request - Problem: {request.problem}")
         if request.code:
@@ -141,23 +189,68 @@ async def query(request: QueryRequest, user: User = Depends(get_current_user), d
                 user_id=user.id,
                 title=session_title
             )
-            db.add(conv_session)
-            db.commit()
-            db.refresh(conv_session)
             logger.info(f"Created new conversation session: {conv_session.id}")
         else:
-            conv_session.updated_at = dt.datetime.now(dt.timezone.utc)
-            db.add(conv_session)
-            db.commit()
+            if (not conv_session.last_topic) or (
+                dt.datetime.now(dt.timezone.utc) - conv_session.updated_at.replace(tzinfo=dt.timezone.utc)).total_seconds() > cfg["support_agent"]["thread_timeout_seconds"]:
+                conv_session.last_topic = None
+                conv_session.current_topic_length = 0
+                logger.info(f"Resetting last topic and current topic length due to thread timeout")
+            else:
+                sys_prompt = "ANSWER WITH ONLY YES OR NO. Is the user's message related to the last topic of the conversation? If yes, return YES, otherwise return NO.\n\n"
+                prompt = f"Last topic: {conv_session.last_topic}\n\nUser message: {current_user_prompt}"
+
+                logger.info(f"Checking if user message is related to last topic:\n{prompt}")
+
+                response = client.models.generate_content(
+                    model=cfg["summary_agent"]["name"],
+                    contents=[prompt],
+                    config=GenerateContentConfig(
+                        system_instruction=sys_prompt,
+                        temperature=cfg["summary_agent"]["temperature"],
+                        top_p=cfg["summary_agent"]["top_p"],
+                        max_output_tokens=40
+                    )
+                )
+
+                logger.info(f"Response: {response.text}")
+
+                response_text = ""
+                if (response.text):
+                    response_text = response.text.strip().lower()
+                    response_text = ''.join(char for char in response_text if char.isalpha()) or "no"
+
+                logger.info(f"Formatted response: {response_text}")
+
+                if response_text != "yes":
+                    conv_session.last_topic = None
+                    conv_session.current_topic_length = 0
+
+            logger.info(f"Current topic length: {conv_session.current_topic_length}")
             logger.info(f"Continuing existing conversation session: {conv_session.id}")
         
+        if (not conv_session.last_topic):
+                logger.info(f"Making topic summary")
+                conv_session.last_topic = make_topic_summary(client, current_user_prompt)
+                logger.info(f"Topic summary: {conv_session.last_topic}")
+
+
+        # extract frustration score from analysis if available
+        frustration_score = None
+        if frustration_analysis and 'frustration_probability' in frustration_analysis:
+            frustration_score = frustration_analysis['frustration_probability']
+
+        frustration_score += ((conv_session.current_topic_length - 1) * 0.1 if conv_session.current_topic_length < 5 else 0.5)
+        frustration_score = min(frustration_score, 1.0)
+
         user_message = Message(
             conversation_session_id=conv_session.id,
             role="user",
             content=current_user_prompt,
             problem=request.problem,
             code=request.code,
-            syntax_errors=str(get_syntax_errors(request.code)) if request.code else None
+            syntax_errors=str(get_syntax_errors(request.code)) if request.code else None,
+            frustration_score=frustration_score
         )
         
         # prepares the full conversation context
@@ -165,30 +258,42 @@ async def query(request: QueryRequest, user: User = Depends(get_current_user), d
             full_conversation = "\n\n".join(conversation_history) + f"\n\nUser: {current_user_prompt}"
         else:
             full_conversation = current_user_prompt
-            
+        
         response = client.models.generate_content(
             model=cfg["support_agent"]["name"],
             contents=[full_conversation],
             config=GenerateContentConfig(
-                system_instruction=cfg["support_agent"]["system_prompt"],
+                system_instruction=(cfg["support_agent"]["frustration_prompt"] if frustration_score and frustration_score > 0.5 else cfg["support_agent"]["system_prompt"]),
                 temperature=cfg["support_agent"]["temperature"],
                 top_p=cfg["support_agent"]["top_p"],
                 max_output_tokens=cfg["support_agent"]["tokens"]
             )
         )
+
+        logger.info(f"Response: {response.text}")
         
         assistant_message = Message(
             conversation_session_id=conv_session.id,
             role="assistant",
             content=response.text
         )
+
+        conv_session.updated_at = dt.datetime.now(dt.timezone.utc)
+        conv_session.current_topic_length += 1
         db.add(user_message)
         db.add(assistant_message)
+        db.add(conv_session)
         db.commit()
         
-        return QueryResponse(response=response.text, session_id=conv_session.id)
+        return QueryResponse(
+            response=response.text, 
+            session_id=conv_session.id, 
+            current_topic_length=conv_session.current_topic_length,
+            frustration_analysis=frustration_analysis
+        )
         
     except Exception as e:
+        logger.error(f"Error in query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

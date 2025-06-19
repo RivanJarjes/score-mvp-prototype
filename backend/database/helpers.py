@@ -9,15 +9,14 @@ from .database import get_session
 class SessionListResponse(BaseModel):
     sessions: list[dict]
 
-
 class SessionHistoryResponse(BaseModel):
     session_id: str
     title: str | None
     messages: list[dict]
 
 
+# get all conversation sessions for the current user
 async def get_user_sessions(user: User = Depends(get_current_user), db: DBSession = Depends(get_session)):
-    """Get all conversation sessions for the current user"""
     sessions = db.exec(
         select(ConversationSession)
         .where(ConversationSession.user_id == user.id)
@@ -38,8 +37,8 @@ async def get_user_sessions(user: User = Depends(get_current_user), db: DBSessio
     return SessionListResponse(sessions=session_list)
 
 
+# get full conversation for a session
 async def get_session_history(session_id: str, user: User = Depends(get_current_user), db: DBSession = Depends(get_session)):
-    """Get full conversation for a session"""
     session = db.get(ConversationSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -66,7 +65,8 @@ async def get_session_history(session_id: str, user: User = Depends(get_current_
             message_data.update({
                 "problem": msg.problem,
                 "code": msg.code,
-                "syntax_errors": msg.syntax_errors
+                "syntax_errors": msg.syntax_errors,
+                "frustration_score": msg.frustration_score
             })
         
         message_list.append(message_data)
